@@ -22,15 +22,6 @@ const (
 	PongTimeout = 10 * time.Minute
 )
 
-type subscribeRequest struct {
-	streams []string
-}
-
-type unsubscribeRequest struct {
-	streams   []string
-	timestamp time.Time
-}
-
 type Client struct {
 	conn          *websocket.Conn
 	ctx           context.Context
@@ -43,26 +34,20 @@ type Client struct {
 	messageID     uint
 	idMu          sync.Mutex
 
-	rateLimiter        chan struct{}
-	subscribeQueue     chan subscribeRequest
-	unsubscribeQueue   chan unsubscribeRequest
-	pendingUnsubscribe map[string]time.Time
-	queueMu            sync.Mutex
+	rateLimiter chan struct{}
+	rateLimitMu sync.Mutex
 }
 
 func NewClient(logger *zap.Logger) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	client := &Client{
-		ctx:                ctx,
-		cancel:             cancel,
-		subscribers:        make(map[string][]interfaces.KLineSubscriber),
-		logger:             logger,
-		activeStreams:      make([]string, 0),
-		rateLimiter:        make(chan struct{}, 5),
-		subscribeQueue:     make(chan subscribeRequest, 100),
-		unsubscribeQueue:   make(chan unsubscribeRequest, 100),
-		pendingUnsubscribe: make(map[string]time.Time),
+		ctx:           ctx,
+		cancel:        cancel,
+		subscribers:   make(map[string][]interfaces.KLineSubscriber),
+		logger:        logger,
+		activeStreams: make([]string, 0),
+		rateLimiter:   make(chan struct{}, 5),
 	}
 
 	for i := 0; i < 8; i++ {
@@ -70,7 +55,6 @@ func NewClient(logger *zap.Logger) *Client {
 	}
 
 	go client.refillRateLimiter()
-	go client.processQueues()
 
 	return client
 }
@@ -102,102 +86,6 @@ func (c *Client) acquireRateLimit() {
 	select {
 	case <-c.rateLimiter:
 	case <-c.ctx.Done():
-	}
-}
-
-func (c *Client) processQueues() {
-	unsubscribeDelay := 5 * time.Second
-	checkInterval := 100 * time.Millisecond
-	ticker := time.NewTicker(checkInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-c.ctx.Done():
-			return
-		case req := <-c.subscribeQueue:
-			// Cancel any pending unsubscribe for these streams
-			c.queueMu.Lock()
-			for _, stream := range req.streams {
-				delete(c.pendingUnsubscribe, stream)
-			}
-			c.queueMu.Unlock()
-
-			// Process subscribe immediately
-			c.acquireRateLimit()
-			if err := c.executeSendSubscribeRequest(req.streams); err != nil {
-				c.logger.Error("Failed to send subscribe request", zap.Strings("streams", req.streams), zap.Error(err))
-			}
-
-		case req := <-c.unsubscribeQueue:
-			// Add to pending with timestamp
-			c.queueMu.Lock()
-			for _, stream := range req.streams {
-				c.pendingUnsubscribe[stream] = req.timestamp
-			}
-			c.queueMu.Unlock()
-
-		case <-ticker.C:
-			// Check for pending unsubscribes that have waited long enough
-			c.processPendingUnsubscribes(unsubscribeDelay)
-		}
-	}
-}
-
-func (c *Client) processPendingUnsubscribes(delay time.Duration) {
-	c.queueMu.Lock()
-	now := time.Now()
-	streamsToUnsubscribe := []string{}
-	
-	for stream, timestamp := range c.pendingUnsubscribe {
-		if now.Sub(timestamp) >= delay {
-			streamsToUnsubscribe = append(streamsToUnsubscribe, stream)
-			delete(c.pendingUnsubscribe, stream)
-		}
-	}
-	c.queueMu.Unlock()
-
-	if len(streamsToUnsubscribe) > 0 {
-		// Check if there are any subscribe requests waiting
-		select {
-		case req := <-c.subscribeQueue:
-			// Process subscribe first, then re-queue the unsubscribe
-			c.queueMu.Lock()
-			for _, stream := range req.streams {
-				delete(c.pendingUnsubscribe, stream)
-			}
-			c.queueMu.Unlock()
-
-			c.acquireRateLimit()
-			if err := c.executeSendSubscribeRequest(req.streams); err != nil {
-				c.logger.Error("Failed to send subscribe request", zap.Strings("streams", req.streams), zap.Error(err))
-			}
-			
-			// Re-add unsubscribes that weren't cancelled
-			c.queueMu.Lock()
-			for _, stream := range streamsToUnsubscribe {
-				if _, cancelled := c.pendingUnsubscribe[stream]; !cancelled {
-					// Check if stream is not in the just-subscribed list
-					isSubscribed := false
-					for _, subStream := range req.streams {
-						if subStream == stream {
-							isSubscribed = true
-							break
-						}
-					}
-					if !isSubscribed {
-						c.pendingUnsubscribe[stream] = now
-					}
-				}
-			}
-			c.queueMu.Unlock()
-		default:
-			// No subscribes waiting, process unsubscribe
-			c.acquireRateLimit()
-			if err := c.executeSendUnsubscribeRequest(streamsToUnsubscribe); err != nil {
-				c.logger.Error("Failed to send unsubscribe request", zap.Strings("streams", streamsToUnsubscribe), zap.Error(err))
-			}
-		}
 	}
 }
 
@@ -249,18 +137,11 @@ func (c *Client) getNextMessageID() uint {
 }
 
 func (c *Client) sendSubscribeRequest(streams []string) error {
-	select {
-	case c.subscribeQueue <- subscribeRequest{streams: streams}:
-		return nil
-	case <-c.ctx.Done():
-		return fmt.Errorf("context cancelled")
-	}
-}
-
-func (c *Client) executeSendSubscribeRequest(streams []string) error {
 	if !c.isConnected || c.conn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
+
+	c.acquireRateLimit()
 
 	req := types.BinanceSubscribeRequest{
 		Method: "SUBSCRIBE",
@@ -282,18 +163,11 @@ func (c *Client) executeSendSubscribeRequest(streams []string) error {
 }
 
 func (c *Client) sendUnsubscribeRequest(streams []string) error {
-	select {
-	case c.unsubscribeQueue <- unsubscribeRequest{streams: streams, timestamp: time.Now()}:
-		return nil
-	case <-c.ctx.Done():
-		return fmt.Errorf("context cancelled")
-	}
-}
-
-func (c *Client) executeSendUnsubscribeRequest(streams []string) error {
 	if !c.isConnected || c.conn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
+
+	c.acquireRateLimit()
 
 	req := types.BinanceSubscribeRequest{
 		Method: "UNSUBSCRIBE",
