@@ -47,7 +47,7 @@ func NewClient(logger *zap.Logger) *Client {
 		subscribers:   make(map[string][]interfaces.KLineSubscriber),
 		logger:        logger,
 		activeStreams: make([]string, 0),
-		rateLimiter:   make(chan struct{}, 5),
+		rateLimiter:   make(chan struct{}, 8),
 	}
 
 	for i := 0; i < 8; i++ {
