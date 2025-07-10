@@ -33,22 +33,60 @@ type Client struct {
 	activeStreams []string
 	messageID     uint
 	idMu          sync.Mutex
+
+	rateLimiter chan struct{}
+	rateLimitMu sync.Mutex
 }
 
 func NewClient(logger *zap.Logger) *Client {
 	ctx, cancel := context.WithCancel(context.Background())
 
-	return &Client{
+	client := &Client{
 		ctx:           ctx,
 		cancel:        cancel,
 		subscribers:   make(map[string][]interfaces.KLineSubscriber),
 		logger:        logger,
 		activeStreams: make([]string, 0),
+		rateLimiter:   make(chan struct{}, 5),
 	}
+
+	for i := 0; i < 8; i++ {
+		client.rateLimiter <- struct{}{}
+	}
+
+	go client.refillRateLimiter()
+
+	return client
 }
 
 func NewWebSocketClient(logger *zap.Logger) interfaces.PublicWebsocketClient {
 	return NewClient(logger)
+}
+
+func (c *Client) refillRateLimiter() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-c.ctx.Done():
+			return
+		case <-ticker.C:
+
+			select {
+			case c.rateLimiter <- struct{}{}:
+			default:
+
+			}
+		}
+	}
+}
+
+func (c *Client) acquireRateLimit() {
+	select {
+	case <-c.rateLimiter:
+	case <-c.ctx.Done():
+	}
 }
 
 func (c *Client) Connect() error {
@@ -103,6 +141,8 @@ func (c *Client) sendSubscribeRequest(streams []string) error {
 		return fmt.Errorf("websocket not connected")
 	}
 
+	c.acquireRateLimit()
+
 	req := types.BinanceSubscribeRequest{
 		Method: "SUBSCRIBE",
 		Params: streams,
@@ -126,6 +166,8 @@ func (c *Client) sendUnsubscribeRequest(streams []string) error {
 	if !c.isConnected || c.conn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
+
+	c.acquireRateLimit()
 
 	req := types.BinanceSubscribeRequest{
 		Method: "UNSUBSCRIBE",
