@@ -2,8 +2,7 @@ package types
 
 import (
 	"encoding/json"
-
-	"github.com/tradingiq/binance-client/internal/interfaces"
+	"github.com/tradingiq/binance-client/interfaces"
 )
 
 type BinanceKlineEvent struct {

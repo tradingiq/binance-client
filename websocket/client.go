@@ -4,15 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/tradingiq/binance-client/interfaces"
+	"github.com/tradingiq/binance-client/types"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coder/websocket"
 	"go.uber.org/zap"
-
-	"github.com/tradingiq/binance-client/internal/interfaces"
-	"github.com/tradingiq/binance-client/internal/types"
 )
 
 const (

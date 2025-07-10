@@ -2,15 +2,14 @@ package main
 
 import (
 	"fmt"
+	"github.com/tradingiq/binance-client/interfaces"
+	"github.com/tradingiq/binance-client/websocket"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
 	"go.uber.org/zap"
-
-	"github.com/tradingiq/binance-client/internal/interfaces"
-	"github.com/tradingiq/binance-client/internal/websocket"
 )
 
 type KlineSubscriber struct {
