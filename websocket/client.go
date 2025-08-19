@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/tradingiq/binance-client/interfaces"
-	"github.com/tradingiq/binance-client/types"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tradingiq/binance-client/interfaces"
+	"github.com/tradingiq/binance-client/types"
 
 	"github.com/coder/websocket"
 	"go.uber.org/zap"
@@ -354,6 +355,7 @@ func (c *Client) handlePing() {
 				cancel()
 				if err != nil {
 					c.logger.Error("Failed to send ping", zap.Error(err))
+					c.Disconnect()
 				}
 			}
 		}
