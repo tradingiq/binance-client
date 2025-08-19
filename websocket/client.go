@@ -4,11 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/tradingiq/binance-client/interfaces"
-	"github.com/tradingiq/binance-client/types"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/tradingiq/binance-client/interfaces"
+	"github.com/tradingiq/binance-client/types"
 
 	"github.com/coder/websocket"
 	"go.uber.org/zap"
@@ -47,7 +48,7 @@ func NewClient(logger *zap.Logger) *Client {
 		subscribers:   make(map[string][]interfaces.KLineSubscriber),
 		logger:        logger,
 		activeStreams: make([]string, 0),
-		rateLimiter:   make(chan struct{}, 5),
+		rateLimiter:   make(chan struct{}, 8),
 	}
 
 	for i := 0; i < 8; i++ {
@@ -354,6 +355,7 @@ func (c *Client) handlePing() {
 				cancel()
 				if err != nil {
 					c.logger.Error("Failed to send ping", zap.Error(err))
+					c.Disconnect()
 				}
 			}
 		}
