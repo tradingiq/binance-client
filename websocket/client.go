@@ -40,15 +40,9 @@ type Client struct {
 }
 
 func NewClient(logger *zap.Logger) *Client {
-	ctx, cancel := context.WithCancel(context.Background())
-
 	client := &Client{
-		ctx:           ctx,
-		cancel:        cancel,
-		subscribers:   make(map[string][]interfaces.KLineSubscriber),
-		logger:        logger,
-		activeStreams: make([]string, 0),
-		rateLimiter:   make(chan struct{}, 8),
+		logger:      logger,
+		rateLimiter: make(chan struct{}, 8),
 	}
 
 	for i := 0; i < 8; i++ {
@@ -97,6 +91,10 @@ func (c *Client) Connect() error {
 	if c.isConnected {
 		return nil
 	}
+
+	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.subscribers = make(map[string][]interfaces.KLineSubscriber)
+	c.activeStreams = make([]string, 0)
 
 	url := BinanceBaseWebSocketURL
 	if len(c.activeStreams) > 0 {
