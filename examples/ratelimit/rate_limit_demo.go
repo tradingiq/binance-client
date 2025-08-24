@@ -55,6 +55,10 @@ func main() {
 
 	client := websocket.NewClient(logger)
 
+	if err := client.Connect(); err != nil {
+		log.Fatal("Failed to connect:", err)
+	}
+
 	symbols := []struct {
 		symbol   string
 		interval string
@@ -102,10 +106,6 @@ func main() {
 		zap.Duration("totalTime", subscribeEnd.Sub(subscribeStart)),
 		zap.Int("totalSymbols", len(symbols)),
 	)
-
-	if err := client.Connect(); err != nil {
-		log.Fatal("Failed to connect:", err)
-	}
 
 	go func() {
 		if err := client.Stream(); err != nil {

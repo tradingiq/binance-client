@@ -2,12 +2,13 @@ package main
 
 import (
 	"fmt"
-	"github.com/tradingiq/binance-client/interfaces"
-	"github.com/tradingiq/binance-client/websocket"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
+
+	"github.com/tradingiq/binance-client/interfaces"
+	"github.com/tradingiq/binance-client/websocket"
 
 	"go.uber.org/zap"
 )
@@ -72,6 +73,10 @@ func main() {
 		interval:  "1m",
 		priceType: "spot",
 		logger:    logger,
+	}
+
+	if err := client.Connect(); err != nil {
+		logger.Error("Stream error", zap.Error(err))
 	}
 
 	if err := client.SubscribeKLine(btcSubscriber); err != nil {
