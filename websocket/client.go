@@ -153,6 +153,10 @@ func (c *Client) Connect() error {
 }
 
 func (c *Client) Disconnect() {
+	c.DisconnectWithCancel(true)
+}
+
+func (c *Client) DisconnectWithCancel(cancelContext bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -160,7 +164,9 @@ func (c *Client) Disconnect() {
 	if c.conn != nil {
 		c.conn.Close(websocket.StatusNormalClosure, "client disconnect")
 	}
-	c.cancel()
+	if cancelContext {
+		c.cancel()
+	}
 	c.logger.Info("Disconnected from Binance WebSocket")
 }
 
@@ -320,7 +326,7 @@ func (c *Client) Stream() error {
 			default:
 				if err := c.readMessage(); err != nil {
 					c.logger.Error("Failed to read message", zap.Error(err))
-					c.Disconnect()
+					c.DisconnectWithCancel(false)
 					break
 				}
 			}
@@ -413,7 +419,7 @@ func (c *Client) connectWithReconnect() error {
 
 			if err := c.resubscribeAll(); err != nil {
 				c.logger.Error("Failed to resubscribe to streams", zap.Error(err))
-				c.Disconnect()
+				c.DisconnectWithCancel(false)
 				continue
 			}
 
@@ -463,7 +469,7 @@ func (c *Client) handlePing() {
 				cancel()
 				if err != nil {
 					c.logger.Error("Failed to send ping", zap.Error(err))
-					c.Disconnect()
+					c.DisconnectWithCancel(false)
 				}
 			}
 		}
