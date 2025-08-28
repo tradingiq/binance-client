@@ -48,6 +48,10 @@ type Client struct {
 	maxReconnectDelay     time.Duration
 	reconnectAttempts     int
 	reconnectMu           sync.Mutex
+
+	pingCtx        context.Context
+	pingCancel     context.CancelFunc
+	handlePingOnce sync.Once
 }
 
 func NewClient(logger *zap.Logger) *Client {
@@ -128,7 +132,13 @@ func (c *Client) Connect() error {
 		return nil
 	}
 
+	if c.pingCancel != nil {
+		c.pingCancel()
+	}
+
 	c.ctx, c.cancel = context.WithCancel(context.Background())
+	c.pingCtx, c.pingCancel = context.WithCancel(context.Background())
+	c.handlePingOnce = sync.Once{}
 	c.subscribers = make(map[string][]interfaces.KLineSubscriber)
 	c.activeStreams = make([]string, 0)
 
@@ -317,7 +327,9 @@ func (c *Client) Stream() error {
 			}
 		}
 
-		go c.handlePing()
+		c.handlePingOnce.Do(func() {
+			go c.handlePing()
+		})
 
 		for c.isConnected {
 			select {
@@ -460,7 +472,7 @@ func (c *Client) handlePing() {
 
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-c.pingCtx.Done():
 			return
 		case <-ticker.C:
 			if c.isConnected && c.conn != nil {
