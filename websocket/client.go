@@ -30,12 +30,11 @@ const (
 
 type Client struct {
 	conn          *websocket.Conn
-	ctx           context.Context
-	cancel        context.CancelFunc
+	clientCtx     context.Context
+	clientCancel  context.CancelFunc
 	subscribers   map[string][]interfaces.KLineSubscriber
 	mu            sync.RWMutex
 	logger        *zap.Logger
-	isConnected   bool
 	activeStreams []string
 	messageID     uint
 	idMu          sync.Mutex
@@ -49,9 +48,8 @@ type Client struct {
 	reconnectAttempts     int
 	reconnectMu           sync.Mutex
 
-	pingCtx        context.Context
-	pingCancel     context.CancelFunc
-	handlePingOnce sync.Once
+	workerCtx    context.Context
+	workerCancel context.CancelFunc
 }
 
 func NewClient(logger *zap.Logger) *Client {
@@ -61,26 +59,14 @@ func NewClient(logger *zap.Logger) *Client {
 		maxReconnectAttempts:  DefaultMaxReconnectAttempts,
 		initialReconnectDelay: DefaultInitialReconnectDelay,
 		maxReconnectDelay:     DefaultMaxReconnectDelay,
+		subscribers:           make(map[string][]interfaces.KLineSubscriber),
+		activeStreams:         make([]string, 0),
 	}
-
-	for i := 0; i < 8; i++ {
-		client.rateLimiter <- struct{}{}
-	}
-
-	go client.refillRateLimiter()
 
 	return client
 }
 
 type ClientOption func(*Client)
-
-func WithReconnectOptions(maxAttempts int, initialDelay, maxDelay time.Duration) ClientOption {
-	return func(c *Client) {
-		c.maxReconnectAttempts = maxAttempts
-		c.initialReconnectDelay = initialDelay
-		c.maxReconnectDelay = maxDelay
-	}
-}
 
 func NewClientWithOptions(logger *zap.Logger, opts ...ClientOption) *Client {
 	client := NewClient(logger)
@@ -104,7 +90,7 @@ func (c *Client) refillRateLimiter() {
 
 	for {
 		select {
-		case <-c.ctx.Done():
+		case <-c.workerCtx.Done():
 			return
 		case <-ticker.C:
 
@@ -120,7 +106,7 @@ func (c *Client) refillRateLimiter() {
 func (c *Client) acquireRateLimit() {
 	select {
 	case <-c.rateLimiter:
-	case <-c.ctx.Done():
+	case <-c.workerCtx.Done():
 	}
 }
 
@@ -128,19 +114,15 @@ func (c *Client) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.isConnected {
+	if c.conn != nil {
 		return nil
 	}
 
-	if c.pingCancel != nil {
-		c.pingCancel()
+	if c.workerCancel != nil {
+		c.workerCancel()
 	}
 
-	c.ctx, c.cancel = context.WithCancel(context.Background())
-	c.pingCtx, c.pingCancel = context.WithCancel(context.Background())
-	c.handlePingOnce = sync.Once{}
-	c.subscribers = make(map[string][]interfaces.KLineSubscriber)
-	c.activeStreams = make([]string, 0)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	url := BinanceBaseWebSocketURL
 	if len(c.activeStreams) > 0 {
@@ -150,13 +132,24 @@ func (c *Client) Connect() error {
 		url = fmt.Sprintf("%s/ws", BinanceBaseWebSocketURL)
 	}
 
-	conn, _, err := websocket.Dial(c.ctx, url, nil)
+	timeoutCtx, timeoutCancel := context.WithTimeout(ctx, 5*time.Second)
+	defer timeoutCancel()
+	conn, _, err := websocket.Dial(timeoutCtx, url, nil)
 	if err != nil {
+		cancel()
 		return fmt.Errorf("failed to connect to websocket: %w", err)
 	}
 
+	for i := 0; i < 8; i++ {
+		c.rateLimiter <- struct{}{}
+	}
+
+	c.workerCtx, c.workerCancel = context.WithCancel(ctx)
+
+	go c.refillRateLimiter()
+	c.clientCtx = ctx
+	c.clientCancel = cancel
 	c.conn = conn
-	c.isConnected = true
 	c.logger.Info("Connected to Binance WebSocket", zap.String("url", url))
 
 	return nil
@@ -170,12 +163,17 @@ func (c *Client) DisconnectWithCancel(cancelContext bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	c.isConnected = false
 	if c.conn != nil {
 		c.conn.Close(websocket.StatusNormalClosure, "client disconnect")
+		c.conn = nil
 	}
+
+	if c.workerCancel != nil {
+		c.workerCancel()
+	}
+
 	if cancelContext {
-		c.cancel()
+		c.clientCancel()
 	}
 	c.logger.Info("Disconnected from Binance WebSocket")
 }
@@ -188,10 +186,18 @@ func (c *Client) getNextMessageID() uint {
 }
 
 func (c *Client) sendSubscribeRequest(streams []string) error {
-	if !c.isConnected || c.conn == nil {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
+	if conn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
 
+	return c.sendSubscribeRequestWithConn(conn, streams)
+}
+
+func (c *Client) sendSubscribeRequestWithConn(conn *websocket.Conn, streams []string) error {
 	c.acquireRateLimit()
 
 	req := types.BinanceSubscribeRequest{
@@ -205,7 +211,7 @@ func (c *Client) sendSubscribeRequest(streams []string) error {
 		return fmt.Errorf("failed to marshal subscribe request: %w", err)
 	}
 
-	if err := c.conn.Write(c.ctx, websocket.MessageText, data); err != nil {
+	if err := conn.Write(c.clientCtx, websocket.MessageText, data); err != nil {
 		return fmt.Errorf("failed to send subscribe request: %w", err)
 	}
 
@@ -214,10 +220,18 @@ func (c *Client) sendSubscribeRequest(streams []string) error {
 }
 
 func (c *Client) sendUnsubscribeRequest(streams []string) error {
-	if !c.isConnected || c.conn == nil {
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
+	if conn == nil {
 		return fmt.Errorf("websocket not connected")
 	}
 
+	return c.sendUnsubscribeRequestWithConn(conn, streams)
+}
+
+func (c *Client) sendUnsubscribeRequestWithConn(conn *websocket.Conn, streams []string) error {
 	c.acquireRateLimit()
 
 	req := types.BinanceSubscribeRequest{
@@ -231,7 +245,7 @@ func (c *Client) sendUnsubscribeRequest(streams []string) error {
 		return fmt.Errorf("failed to marshal unsubscribe request: %w", err)
 	}
 
-	if err := c.conn.Write(c.ctx, websocket.MessageText, data); err != nil {
+	if err := conn.Write(c.clientCtx, websocket.MessageText, data); err != nil {
 		return fmt.Errorf("failed to send unsubscribe request: %w", err)
 	}
 
@@ -243,7 +257,7 @@ func (c *Client) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.isConnected {
+	if c.conn == nil {
 		return errors.New("websocket not connected")
 	}
 
@@ -261,9 +275,10 @@ func (c *Client) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 	c.subscribers[streamName] = append(c.subscribers[streamName], subscriber)
 	c.logger.Info("Subscribed to kline stream", zap.String("stream", streamName))
 
-	if isNewStream && c.isConnected {
+	if isNewStream && c.conn != nil {
+		conn := c.conn
 		go func() {
-			if err := c.sendSubscribeRequest([]string{streamName}); err != nil {
+			if err := c.sendSubscribeRequestWithConn(conn, []string{streamName}); err != nil {
 				c.logger.Error("Failed to send subscribe request", zap.String("stream", streamName), zap.Error(err))
 			}
 		}()
@@ -276,7 +291,7 @@ func (c *Client) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if !c.isConnected {
+	if c.conn == nil {
 		return errors.New("websocket not connected")
 	}
 
@@ -308,9 +323,10 @@ func (c *Client) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 
 	c.logger.Info("Unsubscribed from kline stream", zap.String("stream", streamName))
 
-	if shouldUnsubscribe && c.isConnected {
+	if shouldUnsubscribe && c.conn != nil {
+		conn := c.conn
 		go func() {
-			if err := c.sendUnsubscribeRequest([]string{streamName}); err != nil {
+			if err := c.sendUnsubscribeRequestWithConn(conn, []string{streamName}); err != nil {
 				c.logger.Error("Failed to send unsubscribe request", zap.String("stream", streamName), zap.Error(err))
 			}
 		}()
@@ -321,19 +337,17 @@ func (c *Client) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 
 func (c *Client) Stream() error {
 	for {
-		if !c.isConnected {
+		if c.conn == nil {
 			if err := c.connectWithReconnect(); err != nil {
 				return err
 			}
 		}
 
-		c.handlePingOnce.Do(func() {
-			go c.handlePing()
-		})
+		go c.handlePing()
 
-		for c.isConnected {
+		for c.conn != nil {
 			select {
-			case <-c.ctx.Done():
+			case <-c.clientCtx.Done():
 				return nil
 			default:
 				if err := c.readMessage(); err != nil {
@@ -347,7 +361,15 @@ func (c *Client) Stream() error {
 }
 
 func (c *Client) readMessage() error {
-	_, message, err := c.conn.Read(c.ctx)
+	c.mu.RLock()
+	conn := c.conn
+	c.mu.RUnlock()
+
+	if conn == nil {
+		return fmt.Errorf("websocket not connected")
+	}
+
+	_, message, err := conn.Read(c.clientCtx)
 	if err != nil {
 		return fmt.Errorf("failed to read message: %w", err)
 	}
@@ -422,8 +444,8 @@ func (c *Client) connectWithReconnect() error {
 			select {
 			case <-time.After(delay):
 				continue
-			case <-c.ctx.Done():
-				return c.ctx.Err()
+			case <-c.clientCtx.Done():
+				return c.clientCtx.Err()
 			}
 		} else {
 			c.reconnectAttempts = 0
@@ -472,12 +494,16 @@ func (c *Client) handlePing() {
 
 	for {
 		select {
-		case <-c.pingCtx.Done():
+		case <-c.workerCtx.Done():
 			return
 		case <-ticker.C:
-			if c.isConnected && c.conn != nil {
-				ctx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
-				err := c.conn.Ping(ctx)
+			c.mu.RLock()
+			conn := c.conn
+			c.mu.RUnlock()
+
+			if conn != nil {
+				ctx, cancel := context.WithTimeout(c.clientCtx, 5*time.Second)
+				err := conn.Ping(ctx)
 				cancel()
 				if err != nil {
 					c.logger.Error("Failed to send ping", zap.Error(err))
