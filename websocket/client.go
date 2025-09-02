@@ -23,50 +23,75 @@ const (
 
 	PongTimeout = 10 * time.Minute
 
-	DefaultMaxReconnectAttempts  = 10
-	DefaultInitialReconnectDelay = 1 * time.Second
-	DefaultMaxReconnectDelay     = 30 * time.Second
+	DefaultMaxReconnectAttempts  = 0
+	DefaultReconnectDelay        = 15 * time.Second
 )
 
-type Client struct {
-	conn          *websocket.Conn
-	clientCtx     context.Context
-	clientCancel  context.CancelFunc
+type BaseClient struct {
+	conn         *websocket.Conn
+	clientCtx    context.Context
+	clientCancel context.CancelFunc
+
 	subscribers   map[string][]interfaces.KLineSubscriber
-	mu            sync.RWMutex
-	logger        *zap.Logger
 	activeStreams []string
-	messageID     uint
-	idMu          sync.Mutex
+
+	mu     sync.RWMutex
+	logger *zap.Logger
+
+	messageID uint
+	idMu      sync.Mutex
 
 	rateLimiter chan struct{}
 	rateLimitMu sync.Mutex
-
-	maxReconnectAttempts  int
-	initialReconnectDelay time.Duration
-	maxReconnectDelay     time.Duration
-	reconnectAttempts     int
-	reconnectMu           sync.Mutex
 
 	workerCtx    context.Context
 	workerCancel context.CancelFunc
 }
 
-func NewClient(logger *zap.Logger) *Client {
-	client := &Client{
-		logger:                logger,
-		rateLimiter:           make(chan struct{}, 8),
-		maxReconnectAttempts:  DefaultMaxReconnectAttempts,
-		initialReconnectDelay: DefaultInitialReconnectDelay,
-		maxReconnectDelay:     DefaultMaxReconnectDelay,
-		subscribers:           make(map[string][]interfaces.KLineSubscriber),
-		activeStreams:         make([]string, 0),
-	}
+type ReconnectingClient struct {
+	baseClient *BaseClient
 
-	return client
+	maxReconnectAttempts int
+	reconnectDelay       time.Duration
+	reconnectAttempts    int
+	reconnectMu          sync.Mutex
 }
 
-type ClientOption func(*Client)
+type Client = ReconnectingClient
+
+func NewBaseClient(logger *zap.Logger) *BaseClient {
+	baseClient := &BaseClient{
+		logger:        logger,
+		rateLimiter:   make(chan struct{}, 8),
+		subscribers:   make(map[string][]interfaces.KLineSubscriber),
+		activeStreams: make([]string, 0),
+	}
+
+	return baseClient
+}
+
+func NewReconnectingClient(baseClient *BaseClient) *ReconnectingClient {
+	return &ReconnectingClient{
+		baseClient:           baseClient,
+		maxReconnectAttempts: DefaultMaxReconnectAttempts,
+		reconnectDelay:       DefaultReconnectDelay,
+	}
+}
+
+func NewClient(logger *zap.Logger) *Client {
+	return NewReconnectingClient(NewBaseClient(logger))
+}
+
+type ClientOption func(*ReconnectingClient)
+type BaseClientOption func(*BaseClient)
+
+func NewBaseClientWithOptions(logger *zap.Logger, opts ...BaseClientOption) *BaseClient {
+	baseClient := NewBaseClient(logger)
+	for _, opt := range opts {
+		opt(baseClient)
+	}
+	return baseClient
+}
 
 func NewClientWithOptions(logger *zap.Logger, opts ...ClientOption) *Client {
 	client := NewClient(logger)
@@ -84,7 +109,15 @@ func NewWebSocketClientWithOptions(logger *zap.Logger, opts ...ClientOption) int
 	return NewClientWithOptions(logger, opts...)
 }
 
-func (c *Client) refillRateLimiter() {
+func NewBaseWebSocketClient(logger *zap.Logger) interfaces.PublicWebsocketClient {
+	return NewBaseClient(logger)
+}
+
+func NewBaseWebSocketClientWithOptions(logger *zap.Logger, opts ...BaseClientOption) interfaces.PublicWebsocketClient {
+	return NewBaseClientWithOptions(logger, opts...)
+}
+
+func (c *BaseClient) refillRateLimiter() {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -103,14 +136,14 @@ func (c *Client) refillRateLimiter() {
 	}
 }
 
-func (c *Client) acquireRateLimit() {
+func (c *BaseClient) acquireRateLimit() {
 	select {
 	case <-c.rateLimiter:
 	case <-c.workerCtx.Done():
 	}
 }
 
-func (c *Client) Connect() error {
+func (c *BaseClient) Connect() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -140,8 +173,10 @@ func (c *Client) Connect() error {
 		return fmt.Errorf("failed to connect to websocket: %w", err)
 	}
 
-	for i := 0; i < 8; i++ {
-		c.rateLimiter <- struct{}{}
+	if len(c.rateLimiter) == 0 {
+		for i := 0; i < 8; i++ {
+			c.rateLimiter <- struct{}{}
+		}
 	}
 
 	c.workerCtx, c.workerCancel = context.WithCancel(ctx)
@@ -155,16 +190,17 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-func (c *Client) Disconnect() {
+func (c *BaseClient) Disconnect() {
 	c.DisconnectWithCancel(true)
 }
 
-func (c *Client) DisconnectWithCancel(cancelContext bool) {
+func (c *BaseClient) DisconnectWithCancel(cancelContext bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.conn != nil {
 		c.conn.Close(websocket.StatusNormalClosure, "client disconnect")
+
 		c.conn = nil
 	}
 
@@ -178,14 +214,14 @@ func (c *Client) DisconnectWithCancel(cancelContext bool) {
 	c.logger.Info("Disconnected from Binance WebSocket")
 }
 
-func (c *Client) getNextMessageID() uint {
+func (c *BaseClient) getNextMessageID() uint {
 	c.idMu.Lock()
 	defer c.idMu.Unlock()
 	c.messageID++
 	return c.messageID
 }
 
-func (c *Client) sendSubscribeRequest(streams []string) error {
+func (c *BaseClient) sendSubscribeRequest(streams []string) error {
 	c.mu.RLock()
 	conn := c.conn
 	c.mu.RUnlock()
@@ -197,7 +233,7 @@ func (c *Client) sendSubscribeRequest(streams []string) error {
 	return c.sendSubscribeRequestWithConn(conn, streams)
 }
 
-func (c *Client) sendSubscribeRequestWithConn(conn *websocket.Conn, streams []string) error {
+func (c *BaseClient) sendSubscribeRequestWithConn(conn *websocket.Conn, streams []string) error {
 	c.acquireRateLimit()
 
 	req := types.BinanceSubscribeRequest{
@@ -219,7 +255,7 @@ func (c *Client) sendSubscribeRequestWithConn(conn *websocket.Conn, streams []st
 	return nil
 }
 
-func (c *Client) sendUnsubscribeRequest(streams []string) error {
+func (c *BaseClient) sendUnsubscribeRequest(streams []string) error {
 	c.mu.RLock()
 	conn := c.conn
 	c.mu.RUnlock()
@@ -231,7 +267,7 @@ func (c *Client) sendUnsubscribeRequest(streams []string) error {
 	return c.sendUnsubscribeRequestWithConn(conn, streams)
 }
 
-func (c *Client) sendUnsubscribeRequestWithConn(conn *websocket.Conn, streams []string) error {
+func (c *BaseClient) sendUnsubscribeRequestWithConn(conn *websocket.Conn, streams []string) error {
 	c.acquireRateLimit()
 
 	req := types.BinanceSubscribeRequest{
@@ -253,7 +289,7 @@ func (c *Client) sendUnsubscribeRequestWithConn(conn *websocket.Conn, streams []
 	return nil
 }
 
-func (c *Client) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
+func (c *BaseClient) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -287,7 +323,7 @@ func (c *Client) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 	return nil
 }
 
-func (c *Client) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
+func (c *BaseClient) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -335,32 +371,29 @@ func (c *Client) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
 	return nil
 }
 
-func (c *Client) Stream() error {
-	for {
-		if c.conn == nil {
-			if err := c.connectWithReconnect(); err != nil {
+func (c *BaseClient) Stream() error {
+	if c.conn == nil {
+		return fmt.Errorf("websocket not connected")
+	}
+
+	go c.handlePing()
+
+	for c.conn != nil {
+		select {
+		case <-c.clientCtx.Done():
+			return nil
+		default:
+			if err := c.readMessage(); err != nil {
+				c.logger.Error("Failed to read message", zap.Error(err))
+				c.DisconnectWithCancel(false)
 				return err
 			}
 		}
-
-		go c.handlePing()
-
-		for c.conn != nil {
-			select {
-			case <-c.clientCtx.Done():
-				return nil
-			default:
-				if err := c.readMessage(); err != nil {
-					c.logger.Error("Failed to read message", zap.Error(err))
-					c.DisconnectWithCancel(false)
-					break
-				}
-			}
-		}
 	}
+	return nil
 }
 
-func (c *Client) readMessage() error {
+func (c *BaseClient) readMessage() error {
 	c.mu.RLock()
 	conn := c.conn
 	c.mu.RUnlock()
@@ -403,7 +436,7 @@ func (c *Client) readMessage() error {
 	return nil
 }
 
-func (c *Client) processKlineMessage(streamName string, event types.BinanceKlineEvent) {
+func (c *BaseClient) processKlineMessage(streamName string, event types.BinanceKlineEvent) {
 	c.mu.RLock()
 	subscribers, exists := c.subscribers[streamName]
 	c.mu.RUnlock()
@@ -424,71 +457,7 @@ func (c *Client) processKlineMessage(streamName string, event types.BinanceKline
 	}
 }
 
-func (c *Client) connectWithReconnect() error {
-	c.reconnectMu.Lock()
-	defer c.reconnectMu.Unlock()
-
-	for attempt := 1; attempt <= c.maxReconnectAttempts; attempt++ {
-		c.logger.Info("Attempting to connect", zap.Int("attempt", attempt), zap.Int("maxAttempts", c.maxReconnectAttempts))
-
-		if err := c.Connect(); err != nil {
-			c.logger.Error("Connection attempt failed", zap.Int("attempt", attempt), zap.Error(err))
-
-			if attempt == c.maxReconnectAttempts {
-				return fmt.Errorf("failed to connect after %d attempts: %w", c.maxReconnectAttempts, err)
-			}
-
-			delay := c.calculateBackoffDelay(attempt)
-			c.logger.Info("Waiting before next reconnect attempt", zap.Duration("delay", delay))
-
-			select {
-			case <-time.After(delay):
-				continue
-			case <-c.clientCtx.Done():
-				return c.clientCtx.Err()
-			}
-		} else {
-			c.reconnectAttempts = 0
-			c.logger.Info("Successfully connected", zap.Int("attempt", attempt))
-
-			if err := c.resubscribeAll(); err != nil {
-				c.logger.Error("Failed to resubscribe to streams", zap.Error(err))
-				c.DisconnectWithCancel(false)
-				continue
-			}
-
-			return nil
-		}
-	}
-
-	return fmt.Errorf("exhausted all reconnection attempts")
-}
-
-func (c *Client) calculateBackoffDelay(attempt int) time.Duration {
-	delay := time.Duration(attempt-1) * c.initialReconnectDelay
-	if delay > c.maxReconnectDelay {
-		delay = c.maxReconnectDelay
-	}
-	return delay
-}
-
-func (c *Client) resubscribeAll() error {
-	c.mu.RLock()
-	streams := make([]string, 0, len(c.activeStreams))
-	for _, stream := range c.activeStreams {
-		streams = append(streams, stream)
-	}
-	c.mu.RUnlock()
-
-	if len(streams) == 0 {
-		return nil
-	}
-
-	c.logger.Info("Resubscribing to streams", zap.Strings("streams", streams))
-	return c.sendSubscribeRequest(streams)
-}
-
-func (c *Client) handlePing() {
+func (c *BaseClient) handlePing() {
 	ticker := time.NewTicker(PingInterval)
 	defer ticker.Stop()
 
@@ -512,4 +481,93 @@ func (c *Client) handlePing() {
 			}
 		}
 	}
+}
+
+// ReconnectingClient methods
+func (c *ReconnectingClient) Connect() error {
+	return c.baseClient.Connect()
+}
+
+func (c *ReconnectingClient) Disconnect() {
+	c.baseClient.Disconnect()
+}
+
+func (c *ReconnectingClient) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
+	return c.baseClient.SubscribeKLine(subscriber)
+}
+
+func (c *ReconnectingClient) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
+	return c.baseClient.UnsubscribeKLine(subscriber)
+}
+
+func (c *ReconnectingClient) Stream() error {
+	for {
+		if c.baseClient.conn == nil {
+			if err := c.connectWithReconnect(); err != nil {
+				return err
+			}
+		}
+
+		if err := c.baseClient.Stream(); err != nil {
+			c.baseClient.logger.Error("Stream failed", zap.Error(err))
+			c.baseClient.DisconnectWithCancel(false)
+			continue
+		}
+	}
+}
+
+func (c *ReconnectingClient) connectWithReconnect() error {
+	c.reconnectMu.Lock()
+	defer c.reconnectMu.Unlock()
+
+	for attempt := 1; attempt <= c.maxReconnectAttempts || c.maxReconnectAttempts == 0; attempt++ {
+		c.baseClient.logger.Info("Attempting to connect", zap.Int("attempt", attempt), zap.Int("maxAttempts", c.maxReconnectAttempts))
+
+		if err := c.baseClient.Connect(); err != nil {
+			c.baseClient.logger.Error("Connection attempt failed", zap.Int("attempt", attempt), zap.Error(err))
+
+			if attempt == c.maxReconnectAttempts {
+				return fmt.Errorf("failed to connect after %d attempts: %w", c.maxReconnectAttempts, err)
+			}
+
+			c.baseClient.logger.Info("Waiting before next reconnect attempt", zap.Duration("delay", c.reconnectDelay))
+
+			select {
+			case <-time.After(c.reconnectDelay):
+				continue
+			case <-c.baseClient.clientCtx.Done():
+				return c.baseClient.clientCtx.Err()
+			}
+		} else {
+			c.reconnectAttempts = 0
+			c.baseClient.logger.Info("Successfully connected", zap.Int("attempt", attempt))
+
+			if err := c.resubscribeAll(); err != nil {
+				c.baseClient.logger.Error("Failed to resubscribe to streams", zap.Error(err))
+				c.baseClient.DisconnectWithCancel(false)
+				continue
+			}
+
+			return nil
+		}
+	}
+
+	return fmt.Errorf("exhausted all reconnection attempts")
+}
+
+
+func (c *ReconnectingClient) resubscribeAll() error {
+	c.baseClient.mu.RLock()
+	streams := make([]string, 0, len(c.baseClient.activeStreams))
+	for _, stream := range c.baseClient.activeStreams {
+		streams = append(streams, stream)
+	}
+	c.baseClient.mu.RUnlock()
+
+	if len(streams) == 0 {
+		return nil
+	}
+
+	c.baseClient.logger.Info("Resubscribing to streams", zap.Strings("streams", streams))
+	return c.baseClient.sendSubscribeRequest(streams)
 }
