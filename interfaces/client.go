@@ -7,7 +7,12 @@ type PublicWebsocketClient interface {
 
 	Disconnect()
 
-	SubscribeKLine(subscriber KLineSubscriber) error
+	// Updated to match Bitunix pattern - takes subscription object instead of subscriber
+	SubscribeKLine(subscription *KLineSubscription) error
 
-	UnsubscribeKLine(subscriber KLineSubscriber) error
+	UnsubscribeKLine(subscription *KLineSubscription) error
+
+	// Legacy methods for backward compatibility
+	SubscribeKLineWithSubscriber(subscriber KLineSubscriber) error
+	UnsubscribeKLineWithSubscriber(subscriber KLineSubscriber) error
 }

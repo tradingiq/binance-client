@@ -91,7 +91,7 @@ func main() {
 			zap.Time("timestamp", time.Now()),
 		)
 
-		err := client.SubscribeKLine(subscriber)
+		err := client.SubscribeKLineWithSubscriber(subscriber)
 		if err != nil {
 			logger.Error("Failed to subscribe",
 				zap.String("symbol", sym.symbol),
@@ -144,7 +144,7 @@ func main() {
 			zap.Time("timestamp", time.Now()),
 		)
 
-		err := client.SubscribeKLine(subscriber)
+		err := client.SubscribeKLineWithSubscriber(subscriber)
 		if err != nil {
 			logger.Error("Failed to subscribe",
 				zap.String("symbol", sym.symbol),
@@ -173,7 +173,7 @@ func main() {
 			zap.Time("timestamp", time.Now()),
 		)
 
-		err := client.UnsubscribeKLine(subscribers[i])
+		err := client.UnsubscribeKLineWithSubscriber(subscribers[i])
 		if err != nil {
 			logger.Error("Failed to unsubscribe",
 				zap.String("symbol", subscribers[i].SubscribeSymbol()),

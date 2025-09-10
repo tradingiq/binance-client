@@ -48,7 +48,6 @@ func (s *KlineSubscriber) SubscribeKLine(message interfaces.KlineChannelMessageD
 }
 
 func main() {
-
 	logger, _ := zap.NewDevelopment()
 	defer logger.Sync()
 
@@ -79,11 +78,13 @@ func main() {
 		logger.Error("Stream error", zap.Error(err))
 	}
 
-	if err := client.SubscribeKLine(btcSubscriber); err != nil {
+	// Using legacy method for backward compatibility
+	if err := client.SubscribeKLineWithSubscriber(btcSubscriber); err != nil {
 		logger.Fatal("Failed to subscribe to BTC klines", zap.Error(err))
 	}
 
-	if err := client.SubscribeKLine(ethSubscriber); err != nil {
+	// Using legacy method for backward compatibility
+	if err := client.SubscribeKLineWithSubscriber(ethSubscriber); err != nil {
 		logger.Fatal("Failed to subscribe to ETH klines", zap.Error(err))
 	}
 
@@ -96,13 +97,14 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	fmt.Println("Streaming kline data for BTC and ETH. Press Ctrl+C to stop...")
+	fmt.Println("Streaming kline data for BTC and ETH using legacy interface. Press Ctrl+C to stop...")
 	fmt.Println("LINK will be added after 15 seconds and removed after 45 seconds")
+	fmt.Println("See examples/bitunix-style/ for the new Bitunix-compatible interface")
 
 	go func() {
 		time.Sleep(15 * time.Second)
 		logger.Info("Adding LINKUSDT subscription...")
-		if err := client.SubscribeKLine(linkSubscriber); err != nil {
+		if err := client.SubscribeKLineWithSubscriber(linkSubscriber); err != nil {
 			logger.Error("Failed to subscribe to LINK klines", zap.Error(err))
 		} else {
 			logger.Info("Successfully subscribed to LINKUSDT")
@@ -112,7 +114,7 @@ func main() {
 	go func() {
 		time.Sleep(30 * time.Second)
 		logger.Info("Unsubscribing from ETH klines...")
-		if err := client.UnsubscribeKLine(ethSubscriber); err != nil {
+		if err := client.UnsubscribeKLineWithSubscriber(ethSubscriber); err != nil {
 			logger.Error("Failed to unsubscribe from ETH", zap.Error(err))
 		} else {
 			logger.Info("Successfully unsubscribed from ETHUSDT")
@@ -122,7 +124,7 @@ func main() {
 	go func() {
 		time.Sleep(45 * time.Second)
 		logger.Info("Unsubscribing from LINKUSDT klines...")
-		if err := client.UnsubscribeKLine(linkSubscriber); err != nil {
+		if err := client.UnsubscribeKLineWithSubscriber(linkSubscriber); err != nil {
 			logger.Error("Failed to unsubscribe from LINK", zap.Error(err))
 		} else {
 			logger.Info("Successfully unsubscribed from LINKUSDT")
@@ -132,8 +134,8 @@ func main() {
 	<-sigChan
 	logger.Info("Shutting down...")
 
-	client.UnsubscribeKLine(btcSubscriber)
-	client.UnsubscribeKLine(linkSubscriber)
+	client.UnsubscribeKLineWithSubscriber(btcSubscriber)
+	client.UnsubscribeKLineWithSubscriber(linkSubscriber)
 	client.Disconnect()
 
 	fmt.Println("Goodbye!")

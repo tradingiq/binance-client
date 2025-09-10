@@ -23,8 +23,8 @@ const (
 
 	PongTimeout = 10 * time.Minute
 
-	DefaultMaxReconnectAttempts  = 0
-	DefaultReconnectDelay        = 15 * time.Second
+	DefaultMaxReconnectAttempts = 0
+	DefaultReconnectDelay       = 15 * time.Second
 )
 
 type BaseClient struct {
@@ -289,7 +289,13 @@ func (c *BaseClient) sendUnsubscribeRequestWithConn(conn *websocket.Conn, stream
 	return nil
 }
 
-func (c *BaseClient) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
+// New Bitunix-compatible method
+func (c *BaseClient) SubscribeKLine(subscription *interfaces.KLineSubscription) error {
+	return c.SubscribeKLineWithSubscriber(subscription.Handler)
+}
+
+// Legacy method for backward compatibility
+func (c *BaseClient) SubscribeKLineWithSubscriber(subscriber interfaces.KLineSubscriber) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -323,7 +329,13 @@ func (c *BaseClient) SubscribeKLine(subscriber interfaces.KLineSubscriber) error
 	return nil
 }
 
-func (c *BaseClient) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
+// New Bitunix-compatible method
+func (c *BaseClient) UnsubscribeKLine(subscription *interfaces.KLineSubscription) error {
+	return c.UnsubscribeKLineWithSubscriber(subscription.Handler)
+}
+
+// Legacy method for backward compatibility
+func (c *BaseClient) UnsubscribeKLineWithSubscriber(subscriber interfaces.KLineSubscriber) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -492,12 +504,24 @@ func (c *ReconnectingClient) Disconnect() {
 	c.baseClient.Disconnect()
 }
 
-func (c *ReconnectingClient) SubscribeKLine(subscriber interfaces.KLineSubscriber) error {
-	return c.baseClient.SubscribeKLine(subscriber)
+// New Bitunix-compatible method
+func (c *ReconnectingClient) SubscribeKLine(subscription *interfaces.KLineSubscription) error {
+	return c.baseClient.SubscribeKLine(subscription)
 }
 
-func (c *ReconnectingClient) UnsubscribeKLine(subscriber interfaces.KLineSubscriber) error {
-	return c.baseClient.UnsubscribeKLine(subscriber)
+// Legacy method for backward compatibility
+func (c *ReconnectingClient) SubscribeKLineWithSubscriber(subscriber interfaces.KLineSubscriber) error {
+	return c.baseClient.SubscribeKLineWithSubscriber(subscriber)
+}
+
+// New Bitunix-compatible method
+func (c *ReconnectingClient) UnsubscribeKLine(subscription *interfaces.KLineSubscription) error {
+	return c.baseClient.UnsubscribeKLine(subscription)
+}
+
+// Legacy method for backward compatibility
+func (c *ReconnectingClient) UnsubscribeKLineWithSubscriber(subscriber interfaces.KLineSubscriber) error {
+	return c.baseClient.UnsubscribeKLineWithSubscriber(subscriber)
 }
 
 func (c *ReconnectingClient) Stream() error {
@@ -554,7 +578,6 @@ func (c *ReconnectingClient) connectWithReconnect() error {
 
 	return fmt.Errorf("exhausted all reconnection attempts")
 }
-
 
 func (c *ReconnectingClient) resubscribeAll() error {
 	c.baseClient.mu.RLock()
